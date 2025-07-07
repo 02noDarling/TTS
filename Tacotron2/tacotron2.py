@@ -69,17 +69,26 @@ class Decoder(nn.Module):
 class Tacotron2(nn.Module):
     def __init__(self, vocab_size, embed_size=512, hidden_size=512, n_mels=80):
         super(Tacotron2, self).__init__()
+        self.n_mels = n_mels
         self.encoder = Encoder(vocab_size, embed_size, hidden_size)
         self.decoder = Decoder(hidden_size, n_mels)
-        self.n_mels = n_mels
+        self.postnet = nn.Sequential(
+            nn.Conv1d(n_mels, hidden_size, kernel_size=5, padding=2),
+            nn.BatchNorm1d(hidden_size),
+            nn.Tanh(),
+            nn.Dropout(0.1),
+            nn.Conv1d(hidden_size, n_mels, kernel_size=5, padding=2)
+        )
+        
 
-    def forward(self, text, mels, max_len=1000):
+    def forward(self, text, mels=None, max_len=1000):
         memory = self.encoder(text)  # [batch, seq_len, hidden_size]
         batch_size = text.size(0)
         mel_outputs = []
         stop_tokens = []
         hidden = None
         prev_mel = torch.zeros(batch_size, self.n_mels).to(text.device)
+        use_teacher_forcing = mels is not None
 
         # 初始化hidden
         if hidden is None:
@@ -87,35 +96,21 @@ class Tacotron2(nn.Module):
             c = torch.zeros(1, batch_size, self.decoder.lstm.hidden_size).to(text.device)
             hidden = (h, c)
 
-        for _ in range(max_len):
-            mel_out, stop_token, hidden, _ = self.decoder(memory, prev_mel, hidden)
+        for t in range(max_len):
+            mel_out, stop_token, hidden, attn_weights = self.decoder(memory, prev_mel, hidden)
             mel_outputs.append(mel_out)
             stop_tokens.append(stop_token)
-            prev_mel = mel_out
-            # if torch.all(stop_token > 0.5):  # 停止条件
-            #     break
+            if not use_teacher_forcing:
+                prev_mel = mel_out
+                if torch.all(stop_token > 0.5):  # 停止条件
+                    break
+            elif t < mels.shape[1]:
+                    prev_mel = mels[:, t, :]
         
         mel_outputs = torch.stack(mel_outputs, dim=1)  # [batch, max_len, n_mels]
         stop_tokens = torch.stack(stop_tokens, dim=1)  # [batch, max_len, 1]
-        return mel_outputs, stop_tokens
-
-# 训练代码
-def train(model, dataloader, optimizer, device):
-    model.train()
-    total_loss = 0
-    for batch_idx, (text, mels, stop_targets) in enumerate(dataloader):
-        text, mels, stop_targets = text.to(device), mels.to(device), stop_targets.to(device)
-        optimizer.zero_grad()
-        mel_outputs, stop_tokens = model(text, mels)
-        mel_loss = F.mse_loss(mel_outputs, mels)
-        stop_loss = F.binary_cross_entropy(stop_tokens, stop_targets)
-        loss = mel_loss + stop_loss
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-        if batch_idx % 10 == 0:
-            print(f"Batch {batch_idx}, Loss: {loss.item():.4f}")
-    return total_loss / len(dataloader)
+        mel_outputs_post = mel_outputs + self.postnet(mel_outputs.transpose(1, 2)).transpose(1, 2)
+        return mel_outputs, mel_outputs_post, stop_tokens
 
 # 示例使用
 if __name__ == "__main__":

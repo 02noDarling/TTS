@@ -25,9 +25,11 @@ class LJSpeechDataset(Dataset):
 
         print("原始行数:", len(lines))
         self.metadata = []
-        for line in lines:
+        for line in lines[:1000]:
             line = line.strip()
-            self.metadata.append({"id":line.split('|')[0], "text":line.split('|')[1], "normalized_text":line.split('|')[-1]})
+            wav_path = os.path.join(self.data_dir, "wavs", f"{line.split('|')[0]}.wav")
+            if os.path.exists(wav_path):
+                self.metadata.append({"id":line.split('|')[0], "text":line.split('|')[1], "normalized_text":line.split('|')[-1]})
         # self.metadata = pd.read_csv(os.path.join(data_dir, "metadata.csv"), 
         #                            sep="|", names=["id", "text", "normalized_text"])
         # print(self.metadata.iloc[945]["text"])
@@ -48,8 +50,6 @@ class LJSpeechDataset(Dataset):
 
         # 转为字符序列（或音素）
         text_indices = [self.char_to_idx.get(c, self.char_to_idx["<PAD>"]) for c in text]
-        text_indices = text_indices[:self.max_text_len]
-        text_indices += [self.char_to_idx["<PAD>"]] * (self.max_text_len - len(text_indices))
         text_tensor = torch.tensor(text_indices, dtype=torch.long)
 
         # 加载音频
@@ -67,15 +67,11 @@ class LJSpeechDataset(Dataset):
         mel_spec = torch.tensor(mel_spec).T
         mel_spec = torch.log(mel_spec + 1e-9)  # 对数Mel频谱图
 
-        # 裁剪或填充Mel频谱图
-        mel_len = min(mel_spec.size(0), self.max_mel_len)
-        mel_spec = mel_spec[:mel_len]
-        if mel_len < self.max_mel_len:
-            mel_spec = torch.nn.functional.pad(mel_spec, (0, 0, 0, self.max_mel_len - mel_len))
+        mel_len = mel_spec.size(0)
+        
         # 停止标志（stop token）
-        stop_targets = torch.zeros(self.max_mel_len)
-        stop_targets[:mel_len] = 0
-        stop_targets[mel_len - 1] = 1  # 最后一帧设为1，表示停止
+        stop_targets = torch.zeros(mel_len)
+        stop_targets[-1] = 1  # 最后一帧设为1，表示停止
 
         return text_tensor, mel_spec, stop_targets, mel_len
 
@@ -87,13 +83,43 @@ def get_dataloader(data_dir, batch_size=16):
                             collate_fn=lambda batch: collate_fn(batch, char_to_idx))
     return dataloader, vocab_size
 
+# def collate_fn(batch, char_to_idx):
+#     texts, mels, stops, mel_lens = zip(*batch)
+#     texts = torch.stack(texts)
+#     mels = torch.stack(mels)
+#     stops = torch.stack(stops)
+#     mel_lens = torch.tensor(mel_lens, dtype=torch.long)
+#     return texts, mels, stops, mel_lens
+
 def collate_fn(batch, char_to_idx):
     texts, mels, stops, mel_lens = zip(*batch)
-    texts = torch.stack(texts)
-    mels = torch.stack(mels)
-    stops = torch.stack(stops)
-    mel_lens = torch.tensor(mel_lens, dtype=torch.long)
-    return texts, mels, stops, mel_lens
+    
+    # 获取最大长度
+    text_lengths = [len(t) for t in texts]
+    max_text_len = max(text_lengths)
+    mel_lengths = list(mel_lens)
+    max_mel_len = max(mel_lengths)
+    
+    # 填充文本
+    texts_padded = torch.zeros(len(texts), max_text_len, dtype=torch.long)
+    for i, t in enumerate(texts):
+        texts_padded[i, :len(t)] = t
+    
+    # 填充 Mel
+    mels_padded = torch.zeros(len(mels), max_mel_len, mels[0].size(1))
+    for i, m in enumerate(mels):
+        mels_padded[i, :m.size(0), :] = m
+    
+    # 填充停止标志
+    stops_padded = torch.zeros(len(stops), max_mel_len)
+    for i, s in enumerate(stops):
+        stops_padded[i, :s.size(0)] = s
+    
+    # 转换为张量
+    text_lengths = torch.tensor(text_lengths, dtype=torch.long)
+    mel_lengths = torch.tensor(mel_lengths, dtype=torch.long)
+    
+    return texts_padded, mels_padded, stops_padded, text_lengths, mel_lengths
 
 def audio_to_mel(wav_path, sample_rate=22050, n_mels=80, n_fft=2048, hop_length=256):
     audio, sr = librosa.load(wav_path, sr=sample_rate)
