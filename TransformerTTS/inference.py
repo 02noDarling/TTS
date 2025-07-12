@@ -219,7 +219,7 @@ if __name__ == "__main__":
     char_to_idx, idx_to_char, vocab_size = create_vocab()
     
     # 加载模型（需替换为你的模型路径）
-    model_path = "/Users/hudaili/Desktop/VsCodeProjects/TTS/TransformerTTS/checkpoints.pt"
+    model_path = r"D:\VsCodeProjects\TTS\TransformerTTS\checkpoints.pt"
     model = TransformerTTS(vocab_size=vocab_size, n_mels=80).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     
